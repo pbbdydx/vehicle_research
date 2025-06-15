@@ -223,7 +223,8 @@ df_bin <- df %>% select(-inj_severity)
 y_bin <- df_bin$inj_severity_bin
 x_bin <- model.matrix(~ . - inj_severity_bin, data = df_bin)[, -1]
 
-# use SMOTE here to alleviate class imbalance
+# TODO: use SMOTE here to alleviate class imbalance
+# use smote first before creating data matrix.
 
 # multi
 df_multi <- df %>% select(-inj_severity_bin)
