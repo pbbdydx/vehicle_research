@@ -1,5 +1,14 @@
 ## prelim (loading libraries, read data, etc)
-library(tidyverse)
+library(dplyr)
+library(readr)
+library(ROSE)
+library(glmnet)
+library(e1071)
+library(xgboost)
+library(caret)
+library(pROC)
+library(summarytools)
+library(Matrix)
 library(vtable)
 
 # will focus modeling injury severity on 3 main files: CRASH, PERSON, VEHICLE
@@ -14,6 +23,7 @@ vehicle <- read_csv('data/VEHICLE_2023.csv')
 # not worth dealing with for now
 # flag <- read_csv('data/FLAG_2023.csv')
 
+# ---------- ANALYSIS WORK BEGINS HERE --------------
 joined <- crash %>%
   inner_join(person, by = 'CRN') %>%
   inner_join(vehicle, by = c('CRN', 'UNIT_NUM')) # allows one row to be one driver in one vehicle by adding UNIT_NUM
@@ -68,6 +78,7 @@ df <- df %>% rename(
     collision_type == 6 ~ "Sideswipe (Opposite Direction)"
     )),
   hour_of_day = as.numeric(hour_of_day),
+  crash_month = factor(crash_month),
   day_of_week = factor(case_when(
     day_of_week == 1 ~ "Sunday",
     day_of_week == 2 ~ "Monday",
@@ -111,6 +122,18 @@ df <- df %>% rename(
     relation_to_road == 7 ~ "Gore Zone",
     relation_to_road == 9 ~ "Unknown"
     )),
+  restraint_helmet = factor(case_when(
+    restraint_helmet == '00' ~ "None",
+    restraint_helmet == '01' ~ "Shoulder Belt",
+    restraint_helmet == '02' ~ "Lap Belt",
+    restraint_helmet == '03' ~ "Lap and Shoulder Belt",
+    restraint_helmet == '05' ~ "Motorcycle Helmet",
+    restraint_helmet == '06' ~ "Nonmotorist Wearing Helmet", # filter out?
+    restraint_helmet == '10' ~ "Improper Use",
+    restraint_helmet == '12' ~ "Improper Use (Helmet)",
+    restraint_helmet == '14' ~ "?", # unknown, filter out
+    restraint_helmet %in% c('98', '99') ~ "Other"
+  )),
   roadway_alignment = factor(case_when(
     roadway_alignment == 1 ~ "Straight",
     roadway_alignment == 3 ~ "Curve Left",
@@ -147,6 +170,29 @@ df <- df %>% rename(
     urban_rural == 1 ~ "Rural",
     urban_rural == 2 ~ "Urban"
     )),
+  veh_movement = factor(case_when(
+    veh_movement == "01" ~ "Going straight",
+    veh_movement == "02" ~ "Slowing or stopping in lane",
+    veh_movement == "03" ~ "Stopped in traffic lane",
+    veh_movement == "04" ~ "Passing or overtaking vehicle",
+    veh_movement == "05" ~ "Leaving a parked position",
+    veh_movement == "06" ~ "Parked",
+    veh_movement == "08" ~ "Trying to avoid animal/ped/obj/vehicle",
+    veh_movement == "09" ~ "Turning right on red",
+    veh_movement == "10" ~ "Turning right",
+    veh_movement == "11" ~ "Turning left on red",
+    veh_movement == "12" ~ "Turning left",
+    veh_movement == "13" ~ "Making a U-turn",
+    veh_movement == "14" ~ "Backing up",
+    veh_movement == "15" ~ "Changing lanes or merging",
+    veh_movement == "16" ~ "Negotiating curve - right",
+    veh_movement == "17" ~ "Negotiating curve - left",
+    veh_movement == "18" ~ "Entering traffic lane",
+    veh_movement == "19" ~ "Leaving traffic lane",
+    veh_movement == "98" ~ "Other",
+    veh_movement == "99" ~ "Unknown",
+    TRUE ~ NA_character_
+  )),
   weather1 = factor(case_when(
     weather1 %in% c("01", "02", "08") ~ "Wind",
     weather1 == "03" ~ "Clear",
@@ -199,7 +245,7 @@ df <- df %>% rename(
     )),
   travel_spd = as.numeric(travel_spd)
   ) %>%
-  select(-vulnerable_road_user, -person_type, -impact_point, veh_type)
+  select(-vulnerable_road_user, -person_type, -impact_point, -veh_type)
   # justification of dropped variables
   # vulnerable_road_user: all 0
   # person_type: all 1 by design
@@ -213,28 +259,119 @@ sumtable(df)
 df$inj_severity_bin <- factor(if_else(df$inj_severity %in% c("Killed","Serious"), 1 , 0))
 sumtable(df)
 
-
-# make two matrices for modeling
-
+# make train/test split
+set.seed(123)
 train_ind <- sample(1:nrow(df), floor(0.85 * nrow(df)))
 
-# binary
+# --------- Binary without balancing ----------
 df_bin <- df %>% select(-inj_severity)
 y_bin <- df_bin$inj_severity_bin
-x_bin <- model.matrix(~ . - inj_severity_bin, data = df_bin)[, -1]
-
-# TODO: use SMOTE here to alleviate class imbalance
-# use smote first before creating data matrix.
-
-# multi
-df_multi <- df %>% select(-inj_severity_bin)
-y_multi <- df_multi$inj_severity
-x_multi <- model.matrix(~ . - inj_severity, data = df_multi)[, -1]
-
-x_multi_train <- x_multi[train_ind, ]
-y_multi_train <- y_multi[train_ind]
-x_multi_test <- x_multi[-train_ind, ]
-y_multi_test <- y_multi[-train_ind]
+mf <- model.frame(~ . - inj_severity_bin, data = df_bin, na.action = na.pass)
+x_bin <- model.matrix(~ . - inj_severity_bin, data = mf)[, -1]
 
 
-# model time
+x_bin_train <- x_bin[train_ind, ]
+y_bin_train <- y_bin[train_ind]
+x_bin_test <- x_bin[-train_ind, ]
+y_bin_test <- y_bin[-train_ind]
+
+# --------- Binary with ROSE balancing ----------
+# Use raw data (with factor variables) as input to ROSE before dummy encoding
+df_train_raw <- df_bin[train_ind, ]
+rose_data <- ROSE(inj_severity_bin ~ ., data = df_train_raw, seed = 123)$data
+
+# now dummy encode the balanced data
+x_bin_rose <- model.matrix(~ . - inj_severity_bin, data = rose_data)[, -1]
+y_bin_rose <- rose_data$inj_severity_bin
+
+# garbage collect (remove previous stuff that i dont need)
+keep_vars <- c(
+  "x_bin_train", "y_bin_train",
+  "x_bin_test", "y_bin_test",
+  "df_train_raw", "rose_data",
+  "x_bin_rose", "y_bin_rose"
+)
+
+rm(list = setdiff(ls(), keep_vars))
+gc()
+
+# --------- model without balancing (not worth exploring) ----------
+
+# logistic
+# log_model <- glm(y_bin_train ~ ., data = as.data.frame(x_bin_train), family = "binomial")
+# log_pred <- predict(log_model, newdata = as.data.frame(x_bin_test), type = "response")
+
+# xgboost
+# xgb_model <- xgboost(data = x_bin_train, label = as.numeric(as.character(y_bin_train)),
+                     # objective = "binary:logistic", nrounds = 100, eval_metric = "auc", verbose = 0)
+# xgb_pred <- predict(xgb_model, x_bin_test)
+
+# random forest (to see decision trees)
+# rf_model <- randomForest(x = x_bin_train, y = y_bin_train, ntree = 100)
+# rf_pred <- predict(rf_model, x_bin_test, type = "prob")[,2]
+
+# svm with radial basis kernel
+# svm_model <- svm(x = x_bin_train, y = y_bin_train, kernel = "radial", probability = TRUE)
+# svm_pred <- attr(predict(svm_model, x_bin_test, probability = TRUE), "probabilities")[,2]
+
+# -------- Binary Model with ROSE ------
+
+# logistic
+log_model_rose <- glm(y_bin_rose ~ ., data = as.data.frame(x_bin_rose), family = "binomial")
+log_pred_rose <- predict(log_model_rose, newdata = as.data.frame(x_bin_test), type = "response")
+
+# xgboost
+xgb_model_rose <- xgboost(data = x_bin_rose, label = as.numeric(as.character(y_bin_rose)),
+                           objective = "binary:logistic", nrounds = 100, eval_metric = "auc", verbose = 0)
+xgb_pred_rose <- predict(xgb_model_rose, x_bin_test)
+
+# random forest
+rf_model_rose <- randomForest(x = x_bin_rose, y = y_bin_rose, ntree = 100)
+rf_pred_rose <- predict(rf_model_rose, x_bin_test, type = "prob")[,2]
+
+# svm with ROSE
+svm_model_rose <- svm(x = x_bin_rose, y = y_bin_rose, kernel = "radial", probability = TRUE)
+svm_pred_rose <- attr(predict(svm_model_rose, x_bin_test, probability = TRUE), "probabilities")[,2]
+
+# -------- Regularized Logistic ----------
+
+# no ROSE
+cv_glm <- cv.glmnet(x_bin_train, y = as.numeric(as.character(y_bin_train)), family = "binomial", alpha = 1)
+glmnet_pred <- predict(cv_glm, newx = x_bin_test, s = "lambda.min", type = "response")
+
+# ROSE
+cv_glm_rose <- cv.glmnet(x_bin_rose, y = as.numeric(as.character(y_bin_rose)), family = "binomial", alpha = 1)
+glmnet_pred_rose <- predict(cv_glm_rose, newx = x_bin_test, s = "lambda.min", type = "response")
+
+# -------- Logistic on full dataset (interpretability) --------
+full_log_model <- glm(inj_severity_bin ~ ., data = as.data.frame(x_bin), family = "binomial")
+summary(full_log_model)
+
+cv_glm_full <- cv.glmnet(x_bin, y = as.numeric(as.character(y_bin)), family = "binomial", alpha = 1)
+coef(cv_glm_full, s = "lambda.min")
+
+# --------- Evaluate (Confusion + ROC) ----------
+
+threshold <- 0.5
+
+preds <- list(
+  Logistic_rose = log_pred_rose,
+  XGBoost_rose = xgb_pred_rose,
+  RandomForest_rose = rf_pred_rose,
+  SVM_rose = svm_pred_rose,
+  GLMNet = glmnet_pred,
+  GLMNet_rose = glmnet_pred_rose
+)
+
+# confusion matrices
+for (name in names(preds)) {
+  cat("\n---", name, "---\n")
+  pred_bin <- factor(ifelse(preds[[name]] >= threshold, 1, 0), levels = c(0, 1))
+  print(confusionMatrix(pred_bin, y_bin_test, positive = "1"))
+}
+
+# ROC curves
+roc_list <- lapply(preds, function(p) roc(response = y_bin_test, predictor = p))
+plot(roc_list[[1]], col = 1, main = "ROC Curves", legacy.axes = TRUE)
+for (i in 2:length(roc_list)) lines(roc_list[[i]], col = i)
+legend("bottomright", legend = names(preds), col = 1:length(preds), lty = 1, cex = 0.7)
