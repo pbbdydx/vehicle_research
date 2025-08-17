@@ -12,7 +12,7 @@ library(MLmetrics)
 
 
 # read data
-df <- readRDS('data/clean_data.rds')
+df <- readRDS('data/2024/2024_clean.rds')
 
 
 # ---------- Analysis Starts Here -----------

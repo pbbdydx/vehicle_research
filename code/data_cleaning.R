@@ -6,14 +6,14 @@ library(tidyverse)
 # will focus modeling injury severity on 3 main files: CRASH, PERSON, VEHICLE
 # start with binary modeling, move onto multi-class if want to
 # do statistics stuff later since it takes too much time (unfortunately)
-crash <- read_csv('data/CRASH_2023.csv')
-person <- read_csv('data/PERSON_2023.csv')
-vehicle <- read_csv('data/VEHICLE_2023.csv')
+crash <- read_csv('data/2024/CRASH_2024.csv')
+person <- read_csv('data/2024/PERSON_2024.csv')
+vehicle <- read_csv('data/2024/VEHICLE_2024.csv')
 
 # flag only contains crash level data. possible to do further modeling
 # but any model improvement or insight gain is spurious and requires much more care
 # not worth dealing with for now
-# flag <- read_csv('data/FLAG_2023.csv')
+# flag <- read_csv('data/2024/FLAG_2024.csv')
 
 # ---------- ANALYSIS WORK BEGINS HERE --------------
 joined <- crash %>%
@@ -29,31 +29,69 @@ model_variables <- c(
   # PERSON.csv
   "AGE", "INJ_SEVERITY", "RESTRAINT_HELMET", "SEX", "VULNERABLE_ROAD_USER", "PERSON_TYPE", "VULNERABLE_ROAD_USER",
   # VEHICLE.csv
-  "BODY_TYPE", "GRADE", "IMPACT_POINT", "TRAVEL_SPD", "VEH_MOVEMENT", "VEH_ROLE", "VEH_TYPE"
+  "BODY_TYPE", "GRADE", "IMPACT_POINT", "TRAVEL_SPD", "VEH_MOVEMENT", "VEH_ROLE_CD", "VEH_TYPE"
 )
 
-df <- joined %>%
-  select(all_of(model_variables)) %>%
-  filter(
-    PERSON_TYPE == 1, # person is driver
-    INJ_SEVERITY %in% 0:4, # injury is known and valid
-    COLLISION_TYPE %in% c(1,2,3,4,5,6), # useful collision type
-    VEH_ROLE %in% c(1,2), # hitter or hit
-    TRAVEL_SPD < 150, # reasonable speed
-    # rest are obvious
-    !is.na(CRASH_MONTH),
-    !is.na(HOUR_OF_DAY),
-    !is.na(ROAD_CONDITION),
-    !is.na(RDWY_ALIGNMENT),
-    !is.na(ILLUMINATION),
-    !is.na(TRAVEL_SPD),
-    !is.na(GRADE),
-    !is.na(WEATHER1),
-    !is.na(BODY_TYPE)
-  )
+
+
+
+df <- joined %>% select(all_of(model_variables))
+print(paste("Initial rows:", nrow(df)))
+
+
+# check missingness by column
+na_counts <- colSums(is.na(df))
+na_counts
+
+# ignoring columns that have high NA counts
+# hour of day : 235356 missing (96.3%)
+# illumination : 244173 missing (100%)
+
+
+df <- df %>% filter(PERSON_TYPE == 1)
+print(paste("After PERSON_TYPE filter:", nrow(df)))
+
+df <- df %>% filter(INJ_SEVERITY %in% 0:4)
+print(paste("After INJ_SEVERITY filter:", nrow(df)))
+
+df <- df %>% filter(COLLISION_TYPE %in% 1:6)
+print(paste("After COLLISION_TYPE filter:", nrow(df)))
+
+df <- df %>% filter(TRAVEL_SPD < 200)
+print(paste("After TRAVEL_SPD filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(CRASH_MONTH))
+print(paste("After CRASH_MONTH filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(ROAD_CONDITION))
+print(paste("After ROAD_CONDITION filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(RDWY_ALIGNMENT))
+print(paste("After RDWY_ALIGNMENT filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(TRAVEL_SPD))
+print(paste("After TRAVEL_SPD NA filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(GRADE))
+print(paste("After GRADE filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(WEATHER1))
+print(paste("After WEATHER1 filter:", nrow(df)))
+
+df <- df %>% filter(!is.na(BODY_TYPE))
+print(paste("After BODY_TYPE filter:", nrow(df)))
 
 names(df) <- tolower(names(df))
 
+# print dim  and check missingness by column again
+dim(df)
+colSums(is.na(df))
+# removing columns that have high NA counts after the filter
+# veh_role_cd : 73.2% missing
+# illumination : 100.0% missing
+# hour_of_day : 96.3% missing
+
+df <- df %>% select(-veh_role_cd, -illumination, -hour_of_day)
 
 
 clean_df <- df %>% rename(
@@ -68,7 +106,6 @@ clean_df <- df %>% rename(
     collision_type == 5 ~ "Sideswipe (Same Direction)",
     collision_type == 6 ~ "Sideswipe (Opposite Direction)"
   )),
-  hour_of_day = as.numeric(hour_of_day),
   crash_month = factor(crash_month),
   day_of_week = factor(case_when(
     day_of_week == 1 ~ "Sunday",
@@ -80,28 +117,18 @@ clean_df <- df %>% rename(
     day_of_week == 7 ~ "Saturday"
   )),
   district = factor(district),
-  illumination = factor(case_when(
-    illumination == 1 ~ "Daylight",
-    illumination == 2 ~ "Dark Streetlight",
-    illumination == 3 ~ "Dark No Streetlight",
-    illumination == 4 ~ "Dusk",
-    illumination == 5 ~ "Dawn",
-    illumination == 6 ~ "Dark Unknown",
-    illumination == 8 ~ "Other",
-    illumination == 9 ~ "Unknown",
-  )),
   intersect_type = factor(case_when(
-    intersect_type == "00" ~ "Corridor",
-    intersect_type == "01" ~ "4-way",
-    intersect_type == "02" ~ "T",
-    intersect_type == "03" ~ "Y",
-    intersect_type == "05" ~ "Multi-Road Intersection",
-    intersect_type %in% c("06","07") ~ "Ramp",
-    intersect_type == "08" ~ "Crossover",
-    intersect_type == "09" ~ "RRXing",
-    intersect_type == "10" ~ "Other",
-    intersect_type == "11" ~ "L/Corner",
-    intersect_type %in% c("12","13") ~ "Roundabout"
+    intersect_type == 0 ~ "Corridor",
+    intersect_type == 1 ~ "4-way",
+    intersect_type == 2 ~ "T",
+    intersect_type == 3 ~ "Y",
+    intersect_type == 5 ~ "Multi-Road Intersection",
+    intersect_type %in% c(6,7) ~ "Ramp",
+    intersect_type == 8 ~ "Crossover",
+    intersect_type == 9 ~ "RRXing",
+    intersect_type == 0 ~ "Other",
+    intersect_type == 1 ~ "L/Corner",
+    intersect_type %in% c(12,13) ~ "Roundabout"
   )),
   relation_to_road = factor(case_when(
     relation_to_road == 1 ~ "On Roadway",
@@ -114,16 +141,15 @@ clean_df <- df %>% rename(
     relation_to_road == 9 ~ "Unknown"
   )),
   restraint_helmet = factor(case_when(
-    restraint_helmet == '00' ~ "None",
-    restraint_helmet == '01' ~ "Shoulder Belt",
-    restraint_helmet == '02' ~ "Lap Belt",
-    restraint_helmet == '03' ~ "Lap and Shoulder Belt",
-    restraint_helmet == '05' ~ "Motorcycle Helmet",
-    restraint_helmet == '06' ~ "Nonmotorist Wearing Helmet", # filter out?
-    restraint_helmet == '10' ~ "Improper Use",
-    restraint_helmet == '12' ~ "Improper Use (Helmet)",
-    restraint_helmet == '14' ~ "?", # unknown, filter out
-    restraint_helmet %in% c('98', '99') ~ "Other"
+    restraint_helmet == 0 ~ "None",
+    restraint_helmet == 1 ~ "Shoulder Belt",
+    restraint_helmet == 2 ~ "Lap Belt",
+    restraint_helmet == 3 ~ "Lap and Shoulder Belt",
+    restraint_helmet == 5 ~ "Motorcycle Helmet",
+    restraint_helmet == 6 ~ "Nonmotorist Wearing Helmet", # filter out?
+    restraint_helmet == 10 ~ "Improper Use",
+    restraint_helmet == 12 ~ "Improper Use (Helmet)",
+    restraint_helmet %in% c(98, 99, 14, NA) ~ "Other"
   )),
   roadway_alignment = factor(case_when(
     roadway_alignment == 1 ~ "Straight",
@@ -132,18 +158,17 @@ clean_df <- df %>% rename(
     roadway_alignment == 9 ~ "Unknown"
   )),
   road_condition = factor(case_when(
-    road_condition == "01" ~ "Dry",
-    road_condition == "02" ~ "Ice/Frost",
-    road_condition == "03" ~ "Mud, Dirt, Gravel",
-    road_condition == "04" ~ "Oil",
-    road_condition == "05" ~ "Sand",
-    road_condition == "06" ~ "Slush",
-    road_condition == "07" ~ "Snow",
-    road_condition == "08" ~ "Water (Standing or Moving)",
-    road_condition == "09" ~ "Wet",
-    road_condition == "22" ~ "Mud, Sand, Dirt, Oil (Expired)",
-    road_condition == "98" ~ "Other",
-    road_condition == "99" ~ "Unknown"
+    road_condition == 01 ~ "Dry",
+    road_condition == 02 ~ "Ice/Frost",
+    road_condition == 03 ~ "Mud, Dirt, Gravel",
+    road_condition == 04 ~ "Oil",
+    road_condition == 05 ~ "Sand",
+    road_condition == 06 ~ "Slush",
+    road_condition == 07 ~ "Snow",
+    road_condition == 08 ~ "Water (Standing or Moving)",
+    road_condition == 09 ~ "Wet",
+    road_condition == 98 ~ "Other",
+    road_condition == 99 ~ "Unknown"
   )),
   traffic_control_device = factor(case_when(
     traffic_control_device == 0 ~ "None",
@@ -180,9 +205,7 @@ clean_df <- df %>% rename(
     veh_movement == "17" ~ "Negotiating curve - left",
     veh_movement == "18" ~ "Entering traffic lane",
     veh_movement == "19" ~ "Leaving traffic lane",
-    veh_movement == "98" ~ "Other",
-    veh_movement == "99" ~ "Unknown",
-    TRUE ~ NA_character_
+    veh_movement %in% c("98","99", NA) ~ "Unknown",
   )),
   weather1 = factor(case_when(
     weather1 %in% c("01", "02", "08") ~ "Wind",
@@ -214,10 +237,6 @@ clean_df <- df %>% rename(
     grade == 5 ~ "Crest of Hill",
     grade == 9 ~ "Unknown"
   )),
-  veh_role = factor(case_when(
-    veh_role == 1 ~ "Striking",
-    veh_role == 2 ~ "Struck"
-  )),
   body_type = factor(case_when(
     # this is a data driven simplification of all the body type values encountered by proportions.
     # see: df %>% group_by(body_type) %>% summarize(count = n(), prop = count/nrow(df)) %>% arrange(desc(prop)) %>% print(n=40)
@@ -248,4 +267,4 @@ clean_df <- df %>% rename(
 
 
 # save data
-saveRDS(clean_df, 'data/clean_data.rds')
+saveRDS(clean_df, 'data/2024/2024_clean.rds')
